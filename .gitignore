@@ -1,0 +1,19 @@
+# PyCharm
+.idea/
+*.iml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+env/
+
+# Результаты работы парсера
+parsed_links_pro.csv
+parsed_links.csv
+
+# ОС
+.DS_Store
+Thumbs.db
