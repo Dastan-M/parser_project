@@ -2,7 +2,8 @@ import csv
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 import requests
-
+import os
+from datetime import datetime
 
 def parse_website(target_url):
 
@@ -39,8 +40,17 @@ if __name__ == '__main__':
     site_data = parse_website(site_url)
     all_data.extend(site_data)
 
-  filename = 'parsed_links_pro.csv'
+  # Папка для сохранения: по умолчанию "data" (локально), в Docker будет "/data"
+  data_dir = os.environ.get('DATA_DIR', 'data')
+  os.makedirs(data_dir, exist_ok=True)
+
+  # Имя файла с датой и временем: parsed_links_2026-11-10_14-30.csv
+  timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
+  filename = os.path.join(data_dir, f'parsed_links_{timestamp}.csv')
+
   with open(filename, mode='w', newline='', encoding='utf-8') as file:
     writer = csv.writer(file)
     writer.writerow(['Source_Website', 'Link_Text', 'Full_URL'])
     writer.writerows(all_data)
+
+  print(f'Данные сохранены в {filename}')

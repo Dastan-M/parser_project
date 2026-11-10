@@ -1,0 +1,22 @@
+# PyCharm
+.idea/
+*.iml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Parser results (data lives in Docker Volume, not in image)
+data/
+*.csv
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+README.md

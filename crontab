@@ -1,0 +1,2 @@
+# Запускать парсер каждый час (в 0 минут каждого часа)
+0 * * * * root cd /app && DATA_DIR=/data /usr/local/bin/python main.py >> /proc/1/fd/1 2>&1
