@@ -2,6 +2,11 @@
 set -e
 
 echo "[entrypoint] Запуск cron..."
+
+echo "[entrypoint] Выполняем первичный парсинг при старте..."
+cd /app && DATA_DIR=/data python main.py
+echo "[entrypoint] Первичный парсинг завершен. Дальше работаем по расписанию."
+
 cron
 
 echo "[entrypoint] Cron запущен. Первый парсинг — в начале следующего часа."
