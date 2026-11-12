@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS links (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    site VARCHAR(255),
+    title VARCHAR(255),
+    url VARCHAR(500)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

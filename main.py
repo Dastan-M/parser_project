@@ -48,8 +48,8 @@ if __name__ == '__main__':
     # Подключение к MySQL (порт 3307!)
     print('Подключаемся к базе данных...')
     db = mysql.connector.connect(
-        host='127.0.0.1',
-        port=3307,
+        host=os.getenv('DB_HOST', '127.0.0.1'),
+        port=3306,
         user='root',
         password='mysecretpassword',
         database='parser_db',
