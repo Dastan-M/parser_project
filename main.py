@@ -1,9 +1,9 @@
-import csv
 import os
 from datetime import datetime
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 import requests
+import mysql.connector
 
 
 def parse_website(target_url):
@@ -13,6 +13,7 @@ def parse_website(target_url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         response = requests.get(target_url, timeout=10, headers=headers)
+        response.encoding = 'utf-8'
 
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -44,15 +45,30 @@ if __name__ == '__main__':
         site_data = parse_website(site_url)
         all_data.extend(site_data)
 
-    data_dir = os.environ.get('DATA_DIR', 'data')
-    os.makedirs(data_dir, exist_ok=True)
+    # Подключение к MySQL (порт 3307!)
+    print('Подключаемся к базе данных...')
+    db = mysql.connector.connect(
+        host='127.0.0.1',
+        port=3307,
+        user='root',
+        password='mysecretpassword',
+        database='parser_db',
+        charset='utf8mb4'  # <--- ДОБАВЛЯЕМ КОДИРОВКУ
+    )
+    cursor = db.cursor()
 
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
-    filename = os.path.join(data_dir, f'parsed_links_{timestamp}.csv')
+    # Вставляем каждую ссылку в таблицу
+    print(f'Вставляем {len(all_data)} ссылок в базу...')
+    for row in all_data:
+        cursor.execute(
+            "INSERT INTO links (site, title, url) VALUES (%s, %s, %s)",
+            (row[0], row[1], row[2])
+        )
+    db.commit()
 
-    with open(filename, mode='w', newline='', encoding='utf-8') as file:
-        writer = csv.writer(file)
-        writer.writerow(['Source_Website', 'Link_Text', 'Full_URL'])
-        writer.writerows(all_data)
+    # Исправляем вывод количества строк
+    print(f'✅ Вставлено {len(all_data)} строк в таблицу links')
 
-    print(f'✅ Данные сохранены в {filename}')
+    cursor.close()
+    db.close()
+    print('Соединение с базой закрыто.')
