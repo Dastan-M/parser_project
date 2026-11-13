@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
@@ -37,7 +38,8 @@ def parse_website(target_url):
     return collected_links
 
 
-if __name__ == '__main__':
+def run_parser():
+    """Один цикл парсинга: собирает данные и пишет в БД."""
     urls = ['https://nur.kz', 'https://inform.kz', 'https://kaztag.kz']
     all_data = []
 
@@ -45,30 +47,52 @@ if __name__ == '__main__':
         site_data = parse_website(site_url)
         all_data.extend(site_data)
 
-    # Подключение к MySQL (порт 3307!)
+    if not all_data:
+        print('Нет данных для записи. Пропускаем этот цикл.')
+        return
+
     print('Подключаемся к базе данных...')
-    db = mysql.connector.connect(
-        host=os.getenv('DB_HOST', '127.0.0.1'),
-        port=3306,
-        user='root',
-        password='mysecretpassword',
-        database='parser_db',
-        charset='utf8mb4'  # <--- ДОБАВЛЯЕМ КОДИРОВКУ
-    )
-    cursor = db.cursor()
-
-    # Вставляем каждую ссылку в таблицу
-    print(f'Вставляем {len(all_data)} ссылок в базу...')
-    for row in all_data:
-        cursor.execute(
-            "INSERT INTO links (site, title, url) VALUES (%s, %s, %s)",
-            (row[0], row[1], row[2])
+    try:
+        db = mysql.connector.connect(
+            host=os.getenv('DB_HOST', '127.0.0.1'),
+            port=int(os.getenv('DB_PORT', 3306)),
+            user='root',
+            password='mysecretpassword',
+            database='parser_db',
+            charset='utf8mb4'
         )
-    db.commit()
+        cursor = db.cursor()
 
-    # Исправляем вывод количества строк
-    print(f'✅ Вставлено {len(all_data)} строк в таблицу links')
+        print(f'Вставляем {len(all_data)} ссылок в базу...')
+        for row in all_data:
+            cursor.execute(
+                "INSERT INTO links (site, title, url) VALUES (%s, %s, %s)",
+                (row[0], row[1], row[2])
+            )
+        db.commit()
+        print(f'✅ Вставлено {len(all_data)} строк в таблицу links')
 
-    cursor.close()
-    db.close()
-    print('Соединение с базой закрыто.')
+        cursor.close()
+        db.close()
+        print('Соединение с базой закрыто.')
+
+    except Exception as e:
+        print(f'❌ Ошибка при работе с БД: {e}')
+
+
+if __name__ == '__main__':
+    # Интервал в секундах (3600 = 1 час)
+    interval = int(os.getenv('PARSE_INTERVAL', 3600))
+
+    print(f'🚀 Парсер запущен. Интервал: {interval} секунд ({interval/60:.0f} минут).')
+
+    while True:
+        try:
+            print(f'\n=== Цикл парсинга начат: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} ===')
+            run_parser()
+            print(f'=== Цикл завершён. Следующий через {interval/60:.0f} минут ===\n')
+
+        except Exception as e:
+            print(f'❌ Критическая ошибка в цикле: {e}')
+
+        time.sleep(interval)
