@@ -2,4 +2,4 @@
 set -e
 
 echo "[entrypoint] Запуск парсера..."
-exec python main.py
+exec python -u main.py
