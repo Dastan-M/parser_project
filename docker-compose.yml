@@ -1,17 +1,35 @@
 services:
-  db:
+  db_sources:
     image: mysql:8.0
-    container_name: my-mysql-compose
+    container_name: my-mysql-sources
     environment:
-      MYSQL_ROOT_PASSWORD: mysecretpassword
-      MYSQL_DATABASE: parser_db
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: sources_db
     ports:
       - "3307:3306"
     volumes:
-      - db_data:/var/lib/mysql
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - db_sources_data:/var/lib/mysql
+      - ./sources_init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: [ "CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -pmysecretpassword || exit 1" ]
+      test: [ "CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD || exit 1" ]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 180s
+
+  db_news:
+    image: mysql:8.0
+    container_name: my-mysql-news
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: news_db
+    ports:
+      - "3308:3306"
+    volumes:
+      - db_news_data:/var/lib/mysql
+      - ./news_init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: [ "CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD || exit 1" ]
       interval: 10s
       timeout: 10s
       retries: 20
@@ -21,21 +39,31 @@ services:
     image: phpmyadmin
     container_name: my-phpmyadmin-compose
     environment:
-      PMA_HOST: db
+      PMA_HOSTS: db_sources,db_news
+      PMA_PORTS: 3306,3306
     ports:
       - "8080:80"
     depends_on:
-      db:
+      db_sources:
+        condition: service_healthy
+      db_news:
         condition: service_healthy
 
   parser:
     build: .
     container_name: my-parser-compose
     environment:
-      DB_HOST: db
+      DB_SOURCES_HOST: db_sources
+      DB_SOURCES_PORT: 3306
+      DB_NEWS_HOST: db_news
+      DB_NEWS_PORT: 3306
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
     depends_on:
-      db:
+      db_sources:
+        condition: service_healthy
+      db_news:
         condition: service_healthy
 
 volumes:
-  db_data:
+  db_sources_data:
+  db_news_data:
