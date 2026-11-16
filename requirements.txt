@@ -1,3 +1,4 @@
 requests==2.34.2
 beautifulsoup4==4.15.0
 mysql-connector-python==26.10.0
+courlan==1.4.0

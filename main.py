@@ -6,6 +6,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 import requests
 import mysql.connector
+from courlan import normalize_url
 
 
 def get_db_password():
@@ -39,7 +40,7 @@ def load_sources():
 
 
 def parse_website(target_url, source_domain):
-    """Парсит сайт, оставляет только ссылки с того же домена."""
+    """Парсит сайт, оставляет только ссылки с того же домена, нормализует URL."""
     collected_links = []
     print(f'--- Начинаем парсинг: {target_url} ---')
 
@@ -70,7 +71,13 @@ def parse_website(target_url, source_domain):
                 if not link_domain.endswith(source_domain):
                     continue
 
-                collected_links.append([source_domain, title, full_url])
+                # Нормализуем URL: обрезаем якорь, убираем UTM-метки и т.д.
+                url_without_fragment = full_url.split('#')[0]
+                normalized = normalize_url(url_without_fragment)
+                if not normalized:
+                    continue  # если URL невалидный — пропускаем
+
+                collected_links.append([source_domain, title, normalized])
 
                 if len(collected_links) >= 15:
                     break
