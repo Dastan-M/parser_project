@@ -4,5 +4,6 @@ CREATE TABLE IF NOT EXISTS news (
     title VARCHAR(500),
     url VARCHAR(2048) NOT NULL,
     url_hash CHAR(64) UNIQUE NOT NULL,
+    content LONGTEXT,
     parsed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

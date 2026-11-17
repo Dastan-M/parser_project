@@ -8,13 +8,15 @@ from parsel import Selector
 import requests
 import mysql.connector
 from courlan import normalize_url
+import trafilatura
+
 
 def get_db_password():
     return os.getenv('MYSQL_ROOT_PASSWORD', 'mysecretpassword')
 
 
 def load_sources():
-    """Читает список сайтов из sources_db. Возвращает список (name, url, domain)."""
+    """Читает список сайтов из sources_db."""
     db = None
     cursor = None
     try:
@@ -38,22 +40,38 @@ def load_sources():
         if db is not None and db.is_connected():
             db.close()
 
+
 def get_news_xpath(domain):
-    """Возвращает XPath для новостных ссылок на конкретном сайте."""
+    """XPath для новостных ссылок на конкретном сайте."""
     if 'kaztag' in domain:
-        # Новости kaztag.kz — <a class="title"> внутри <div class="top-inner">
         return '//div[@class="top-inner"]//a[@href]'
     if 'nur.kz' in domain:
-        # Новости nur.kz — <a> внутри <article>
         return '//article//a[@href]'
     if 'zakon.kz' in domain:
-        # Новости zakon.kz — ссылки на .html
         return '//a[contains(@href, ".html")]'
-    # Fallback для других сайтов
     return '//a[@href]'
 
+
+def fetch_article_text(url):
+    """Скачивает статью и извлекает чистый текст через trafilatura."""
+    try:
+        downloaded = trafilatura.fetch_url(url)
+        if not downloaded:
+            return None
+        text = trafilatura.extract(
+            downloaded,
+            include_comments=False,
+            include_tables=False,
+            favor_recall=True
+        )
+        return text
+    except Exception as e:
+        print(f'  ⚠️ Ошибка при извлечении текста из {url[:60]}: {e}')
+        return None
+
+
 def parse_website(target_url, source_domain):
-    """Парсит сайт через parsel+XPath, оставляет только новости."""
+    """Парсит сайт, оставляет только новости, тянет текст каждой статьи."""
     collected_links = []
     print(f'--- Начинаем парсинг: {target_url} ---')
 
@@ -68,15 +86,15 @@ def parse_website(target_url, source_domain):
 
         selector = Selector(text=response.text)
 
-        # XPath: для каждого сайта — свой, в зависимости от структуры
         news_elements = selector.xpath(get_news_xpath(source_domain))
         if not news_elements:
             news_elements = selector.xpath('//a[@href]')
 
         print(f'Найдено <a> элементов: {len(news_elements)}')
 
+        seen_urls = set()  # локальный дедуп в рамках одного сайта
+
         for link in news_elements:
-            # XPath: normalize-space(string(.)) — берёт весь текст внутри <a>, убирает лишние пробелы
             title = (link.xpath('normalize-space(string(.))').get() or '').strip()
             href = link.attrib.get('href', '')
 
@@ -85,32 +103,38 @@ def parse_website(target_url, source_domain):
 
             full_url = urljoin(target_url, href)
 
-            # Фильтр 1: только http/https
             if not full_url.startswith(('http://', 'https://')):
                 continue
 
-            # Фильтр 2: только тот же домен
             link_domain = urlparse(full_url).netloc
             if not link_domain.endswith(source_domain):
                 continue
 
-            # Фильтр 3: паттерн новости для каждого сайта
-            # nur.kz:      /2457843-slug        — 5+ цифр подряд
-            # zakon.kz:    /6538895-slug.html   — 6+ цифр + дефис
-            # kaztag.kz:   /ru/news/{slug}      — /news/ + 10+ символов slug
+            # Паттерн новости для каждого сайта
             if not re.search(
                 r'(/\d{5,})|(/news/[a-z0-9\-]{10,})|(/\d{6,}-)',
                 full_url
             ):
                 continue
 
-            # Нормализация: обрезаем якорь, UTM
             url_without_fragment = full_url.split('#')[0]
             normalized = normalize_url(url_without_fragment)
             if not normalized:
                 continue
 
-            collected_links.append([source_domain, title, normalized])
+            if normalized in seen_urls:
+                continue
+            seen_urls.add(normalized)
+
+            # Заголовок не должен быть пустым
+            if not title:
+                continue
+
+            # Скачиваем текст статьи
+            print(f'  [{len(collected_links) + 1}] Тянем текст: {title[:50]}...')
+            content = fetch_article_text(normalized)
+
+            collected_links.append([source_domain, title, normalized, content])
 
             if len(collected_links) >= 15:
                 break
@@ -124,7 +148,7 @@ def parse_website(target_url, source_domain):
 
 
 def save_news(all_data):
-    """Сохраняет новости в news_db. Возвращает число вставленных строк."""
+    """Сохраняет новости (с текстом) в news_db. Возвращает число вставленных строк."""
     if not all_data:
         return 0
 
@@ -143,12 +167,12 @@ def save_news(all_data):
         cursor = db.cursor()
 
         for row in all_data:
-            source_domain, title, url = row
+            source_domain, title, url, content = row
             url_hash = hashlib.sha256(url.encode('utf-8')).hexdigest()
             cursor.execute(
-                "INSERT IGNORE INTO news (source_domain, title, url, url_hash) "
-                "VALUES (%s, %s, %s, %s)",
-                (source_domain, title, url, url_hash)
+                "INSERT IGNORE INTO news (source_domain, title, url, url_hash, content) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (source_domain, title, url, url_hash, content)
             )
             inserted += cursor.rowcount
 
@@ -166,7 +190,7 @@ def save_news(all_data):
 
 
 def run_parser():
-    """Один цикл: читает источники, парсит, сохраняет новости."""
+    """Один цикл: читает источники, парсит, сохраняет новости с текстом."""
     sources = load_sources()
 
     if not sources:
@@ -184,7 +208,7 @@ def run_parser():
         print('Нет данных для записи. Пропускаем этот цикл.')
         return
 
-    print(f'💾 Сохраняем {len(all_data)} ссылок в news_db...')
+    print(f'💾 Сохраняем {len(all_data)} новостей в news_db...')
     inserted = save_news(all_data)
     print(f'✅ Вставлено новых строк: {inserted} (из {len(all_data)} собранных)')
 

@@ -3,3 +3,4 @@ beautifulsoup4==4.15.0
 mysql-connector-python==26.10.0
 courlan==1.4.0
 parsel==1.9.1
+trafilatura==1.8.0
