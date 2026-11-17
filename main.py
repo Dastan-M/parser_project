@@ -1,13 +1,13 @@
 import os
+import re
 import time
 import hashlib
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
-from bs4 import BeautifulSoup
+from parsel import Selector
 import requests
 import mysql.connector
 from courlan import normalize_url
-
 
 def get_db_password():
     return os.getenv('MYSQL_ROOT_PASSWORD', 'mysecretpassword')
@@ -40,7 +40,7 @@ def load_sources():
 
 
 def parse_website(target_url, source_domain):
-    """Парсит сайт, оставляет только ссылки с того же домена, нормализует URL."""
+    """Парсит сайт через parsel+XPath, оставляет только новости."""
     collected_links = []
     print(f'--- Начинаем парсинг: {target_url} ---')
 
@@ -49,42 +49,55 @@ def parse_website(target_url, source_domain):
         response = requests.get(target_url, timeout=10, headers=headers)
         response.encoding = 'utf-8'
 
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            links = soup.find_all('a')
-
-            for link in links:
-                title = link.get_text(strip=True)
-                href = link.get('href')
-
-                if not href:
-                    continue
-
-                full_url = urljoin(target_url, href)
-
-                # Фильтр 1: только http/https
-                if not full_url.startswith(('http://', 'https://')):
-                    continue
-
-                # Фильтр 2: только тот же домен (или поддомены)
-                link_domain = urlparse(full_url).netloc
-                if not link_domain.endswith(source_domain):
-                    continue
-
-                # Нормализуем URL: обрезаем якорь, убираем UTM-метки и т.д.
-                url_without_fragment = full_url.split('#')[0]
-                normalized = normalize_url(url_without_fragment)
-                if not normalized:
-                    continue  # если URL невалидный — пропускаем
-
-                collected_links.append([source_domain, title, normalized])
-
-                if len(collected_links) >= 15:
-                    break
-
-            print(f'--- Завершен парсинг: {target_url}. Собрано: {len(collected_links)} ---\n')
-        else:
+        if response.status_code != 200:
             print(f'Сайт {target_url} ответил со статусом: {response.status_code}')
+            return collected_links
+
+        selector = Selector(text=response.text)
+
+        # XPath: сначала пробуем ссылки внутри <article> (новостные карточки)
+        # Fallback: все <a> с href (для сайтов с другой структурой)
+        news_elements = selector.xpath('//article//a[@href]')
+        if not news_elements:
+            news_elements = selector.xpath('//a[@href]')
+
+        print(f'Найдено <a> элементов: {len(news_elements)}')
+
+        for link in news_elements:
+            # XPath: normalize-space(string(.)) — берёт весь текст внутри <a>, убирает лишние пробелы
+            title = (link.xpath('normalize-space(string(.))').get() or '').strip()
+            href = link.attrib.get('href', '')
+
+            if not href:
+                continue
+
+            full_url = urljoin(target_url, href)
+
+            # Фильтр 1: только http/https
+            if not full_url.startswith(('http://', 'https://')):
+                continue
+
+            # Фильтр 2: только тот же домен
+            link_domain = urlparse(full_url).netloc
+            if not link_domain.endswith(source_domain):
+                continue
+
+            # Фильтр 3: паттерн новости — ID (5+ цифр) или /news/ или /article/
+            if not re.search(r'(/\d{5,})|(/news/)|(/article/)', full_url):
+                continue
+
+            # Нормализация: обрезаем якорь, UTM
+            url_without_fragment = full_url.split('#')[0]
+            normalized = normalize_url(url_without_fragment)
+            if not normalized:
+                continue
+
+            collected_links.append([source_domain, title, normalized])
+
+            if len(collected_links) >= 15:
+                break
+
+        print(f'--- Завершен парсинг: {target_url}. Собрано: {len(collected_links)} ---\n')
 
     except Exception as e:
         print(f'Ошибка при запросе к {target_url}: {e}')
