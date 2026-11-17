@@ -38,6 +38,19 @@ def load_sources():
         if db is not None and db.is_connected():
             db.close()
 
+def get_news_xpath(domain):
+    """Возвращает XPath для новостных ссылок на конкретном сайте."""
+    if 'kaztag' in domain:
+        # Новости kaztag.kz — <a class="title"> внутри <div class="top-inner">
+        return '//div[@class="top-inner"]//a[@href]'
+    if 'nur.kz' in domain:
+        # Новости nur.kz — <a> внутри <article>
+        return '//article//a[@href]'
+    if 'zakon.kz' in domain:
+        # Новости zakon.kz — ссылки на .html
+        return '//a[contains(@href, ".html")]'
+    # Fallback для других сайтов
+    return '//a[@href]'
 
 def parse_website(target_url, source_domain):
     """Парсит сайт через parsel+XPath, оставляет только новости."""
@@ -55,9 +68,8 @@ def parse_website(target_url, source_domain):
 
         selector = Selector(text=response.text)
 
-        # XPath: сначала пробуем ссылки внутри <article> (новостные карточки)
-        # Fallback: все <a> с href (для сайтов с другой структурой)
-        news_elements = selector.xpath('//article//a[@href]')
+        # XPath: для каждого сайта — свой, в зависимости от структуры
+        news_elements = selector.xpath(get_news_xpath(source_domain))
         if not news_elements:
             news_elements = selector.xpath('//a[@href]')
 
@@ -82,8 +94,14 @@ def parse_website(target_url, source_domain):
             if not link_domain.endswith(source_domain):
                 continue
 
-            # Фильтр 3: паттерн новости — ID (5+ цифр) или /news/ или /article/
-            if not re.search(r'(/\d{5,})|(/news/)|(/article/)', full_url):
+            # Фильтр 3: паттерн новости для каждого сайта
+            # nur.kz:      /2457843-slug        — 5+ цифр подряд
+            # zakon.kz:    /6538895-slug.html   — 6+ цифр + дефис
+            # kaztag.kz:   /ru/news/{slug}      — /news/ + 10+ символов slug
+            if not re.search(
+                r'(/\d{5,})|(/news/[a-z0-9\-]{10,})|(/\d{6,}-)',
+                full_url
+            ):
                 continue
 
             # Нормализация: обрезаем якорь, UTM
