@@ -1,9 +1,10 @@
 CREATE TABLE IF NOT EXISTS news (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    source_domain VARCHAR(255) NOT NULL,
+    source_id INT NOT NULL,
     title VARCHAR(500),
     url VARCHAR(2048) NOT NULL,
     url_hash CHAR(64) UNIQUE NOT NULL,
-    content LONGTEXT,
-    parsed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    content MEDIUMTEXT NULL,
+    published_date DATETIME NULL,
+    parsed_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

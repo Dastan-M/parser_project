@@ -16,7 +16,7 @@ def get_db_password():
 
 
 def load_sources():
-    """Читает список сайтов из sources_db."""
+    """Читает только ВКЛЮЧЁННЫЕ сайты из sources_db. Возвращает (id, name, url, domain)."""
     db = None
     cursor = None
     try:
@@ -29,7 +29,7 @@ def load_sources():
             charset='utf8mb4'
         )
         cursor = db.cursor()
-        cursor.execute("SELECT name, url, domain FROM sources")
+        cursor.execute("SELECT id, name, url, domain FROM sources WHERE enabled = TRUE")
         return cursor.fetchall()
     except mysql.connector.Error as e:
         print(f'❌ Ошибка при чтении sources_db: {e}')
@@ -42,7 +42,6 @@ def load_sources():
 
 
 def get_news_xpath(domain):
-    """XPath для новостных ссылок на конкретном сайте."""
     if 'kaztag' in domain:
         return '//div[@class="top-inner"]//a[@href]'
     if 'nur.kz' in domain:
@@ -52,28 +51,46 @@ def get_news_xpath(domain):
     return '//a[@href]'
 
 
-def fetch_article_text(url):
-    """Скачивает статью и извлекает чистый текст через trafilatura."""
+def parse_date(date_str):
+    """Парсит дату из разных форматов в MySQL DATETIME. Если не получилось — None."""
+    if not date_str:
+        return None
+    for fmt in ['%Y-%m-%d', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%d.%m.%Y', '%Y/%m/%d']:
+        try:
+            return datetime.strptime(date_str[:19], fmt).strftime('%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            continue
+    return None
+
+
+def fetch_article(url):
+    """Скачивает статью, возвращает (текст, дата_публикации)."""
     try:
         downloaded = trafilatura.fetch_url(url)
         if not downloaded:
-            return None
-        text = trafilatura.extract(
+            return None, None
+
+        # Метаданные (дата публикации)
+        metadata = trafilatura.extract_metadata(downloaded)
+        published_date = parse_date(metadata.date) if metadata and metadata.date else None
+
+        # Текст статьи
+        content = trafilatura.extract(
             downloaded,
             include_comments=False,
             include_tables=False,
             favor_recall=True
         )
-        return text
+        return content, published_date
     except Exception as e:
-        print(f'  ⚠️ Ошибка при извлечении текста из {url[:60]}: {e}')
-        return None
+        print(f'  ⚠️ Ошибка при извлечении статьи {url[:60]}: {e}')
+        return None, None
 
 
-def parse_website(target_url, source_domain):
-    """Парсит сайт, оставляет только новости, тянет текст каждой статьи."""
+def parse_website(source_id, target_url, source_domain):
+    """Парсит сайт, возвращает список [source_id, title, url, content, published_date]."""
     collected_links = []
-    print(f'--- Начинаем парсинг: {target_url} ---')
+    print(f'--- Начинаем парсинг: {target_url} (source_id={source_id}) ---')
 
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
@@ -85,24 +102,21 @@ def parse_website(target_url, source_domain):
             return collected_links
 
         selector = Selector(text=response.text)
-
         news_elements = selector.xpath(get_news_xpath(source_domain))
         if not news_elements:
             news_elements = selector.xpath('//a[@href]')
 
         print(f'Найдено <a> элементов: {len(news_elements)}')
 
-        seen_urls = set()  # локальный дедуп в рамках одного сайта
+        seen_urls = set()
 
         for link in news_elements:
             title = (link.xpath('normalize-space(string(.))').get() or '').strip()
             href = link.attrib.get('href', '')
-
             if not href:
                 continue
 
             full_url = urljoin(target_url, href)
-
             if not full_url.startswith(('http://', 'https://')):
                 continue
 
@@ -110,31 +124,21 @@ def parse_website(target_url, source_domain):
             if not link_domain.endswith(source_domain):
                 continue
 
-            # Паттерн новости для каждого сайта
-            if not re.search(
-                r'(/\d{5,})|(/news/[a-z0-9\-]{10,})|(/\d{6,}-)',
-                full_url
-            ):
+            if not re.search(r'(/\d{5,})|(/news/[a-z0-9\-]{10,})|(/\d{6,}-)', full_url):
                 continue
 
-            url_without_fragment = full_url.split('#')[0]
-            normalized = normalize_url(url_without_fragment)
-            if not normalized:
-                continue
-
-            if normalized in seen_urls:
+            normalized = normalize_url(full_url.split('#')[0])
+            if not normalized or normalized in seen_urls:
                 continue
             seen_urls.add(normalized)
 
-            # Заголовок не должен быть пустым
             if not title:
                 continue
 
-            # Скачиваем текст статьи
             print(f'  [{len(collected_links) + 1}] Тянем текст: {title[:50]}...')
-            content = fetch_article_text(normalized)
+            content, published_date = fetch_article(normalized)
 
-            collected_links.append([source_domain, title, normalized, content])
+            collected_links.append([source_id, title, normalized, content, published_date])
 
             if len(collected_links) >= 15:
                 break
@@ -148,7 +152,7 @@ def parse_website(target_url, source_domain):
 
 
 def save_news(all_data):
-    """Сохраняет новости (с текстом) в news_db. Возвращает число вставленных строк."""
+    """Сохраняет новости в news_db. Возвращает число вставленных строк."""
     if not all_data:
         return 0
 
@@ -167,12 +171,13 @@ def save_news(all_data):
         cursor = db.cursor()
 
         for row in all_data:
-            source_domain, title, url, content = row
+            source_id, title, url, content, published_date = row
             url_hash = hashlib.sha256(url.encode('utf-8')).hexdigest()
             cursor.execute(
-                "INSERT IGNORE INTO news (source_domain, title, url, url_hash, content) "
-                "VALUES (%s, %s, %s, %s, %s)",
-                (source_domain, title, url, url_hash, content)
+                "INSERT IGNORE INTO news "
+                "(source_id, title, url, url_hash, content, published_date) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (source_id, title, url, url_hash, content, published_date)
             )
             inserted += cursor.rowcount
 
@@ -190,18 +195,17 @@ def save_news(all_data):
 
 
 def run_parser():
-    """Один цикл: читает источники, парсит, сохраняет новости с текстом."""
     sources = load_sources()
 
     if not sources:
-        print('❌ Нет источников в sources_db. Пропускаем цикл.')
+        print('❌ Нет включённых источников в sources_db. Пропускаем цикл.')
         return
 
-    print(f'📋 Загружено источников: {len(sources)}')
+    print(f'📋 Загружено включённых источников: {len(sources)}')
 
     all_data = []
-    for name, url, domain in sources:
-        site_data = parse_website(url, domain)
+    for source_id, name, url, domain in sources:
+        site_data = parse_website(source_id, url, domain)
         all_data.extend(site_data)
 
     if not all_data:
