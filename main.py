@@ -10,24 +10,17 @@ import mysql.connector
 from courlan import normalize_url
 import trafilatura
 
-
-def get_db_password():
-    return os.getenv('MYSQL_ROOT_PASSWORD', 'mysecretpassword')
+from config import get_parse_interval
+from db import get_connection, url_exists, save_news_one
 
 
 def load_sources():
-    """Читает только ВКЛЮЧЁННЫЕ сайты из sources_db. Возвращает (id, name, url, domain)."""
-    db = None
+    """Читает только ВКЛЮЧЁННЫЕ сайты из sources_db."""
+    db = get_connection('sources')
+    if db is None:
+        return []
     cursor = None
     try:
-        db = mysql.connector.connect(
-            host=os.getenv('DB_SOURCES_HOST', '127.0.0.1'),
-            port=int(os.getenv('DB_SOURCES_PORT', 3306)),
-            user='root',
-            password=get_db_password(),
-            database='sources_db',
-            charset='utf8mb4'
-        )
         cursor = db.cursor()
         cursor.execute("SELECT id, name, url, domain FROM sources WHERE enabled = TRUE")
         return cursor.fetchall()
@@ -37,7 +30,7 @@ def load_sources():
     finally:
         if cursor is not None:
             cursor.close()
-        if db is not None and db.is_connected():
+        if db.is_connected():
             db.close()
 
 
@@ -52,7 +45,6 @@ def get_news_xpath(domain):
 
 
 def parse_date(date_str):
-    """Парсит дату из разных форматов в MySQL DATETIME. Если не получилось — None."""
     if not date_str:
         return None
     for fmt in ['%Y-%m-%d', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%d.%m.%Y', '%Y/%m/%d']:
@@ -69,12 +61,8 @@ def fetch_article(url):
         downloaded = trafilatura.fetch_url(url)
         if not downloaded:
             return None, None
-
-        # Метаданные (дата публикации)
         metadata = trafilatura.extract_metadata(downloaded)
         published_date = parse_date(metadata.date) if metadata and metadata.date else None
-
-        # Текст статьи
         content = trafilatura.extract(
             downloaded,
             include_comments=False,
@@ -83,7 +71,7 @@ def fetch_article(url):
         )
         return content, published_date
     except Exception as e:
-        print(f'  ⚠️ Ошибка при извлечении статьи {url[:60]}: {e}')
+        print(f'  ⚠️ Ошибка при извлечении {url[:60]}: {e}')
         return None, None
 
 
@@ -152,45 +140,43 @@ def parse_website(source_id, target_url, source_domain):
 
 
 def save_news(all_data):
-    """Сохраняет новости в news_db. Возвращает число вставленных строк."""
+    """Вставляет новости ПО ОДНОЙ, с коммитом после каждой и проверкой на дубли."""
     if not all_data:
         return 0
 
-    db = None
+    db = get_connection('news')
+    if db is None:
+        return 0
+
     cursor = None
     inserted = 0
+    skipped = 0
     try:
-        db = mysql.connector.connect(
-            host=os.getenv('DB_NEWS_HOST', '127.0.0.1'),
-            port=int(os.getenv('DB_NEWS_PORT', 3306)),
-            user='root',
-            password=get_db_password(),
-            database='news_db',
-            charset='utf8mb4'
-        )
         cursor = db.cursor()
 
         for row in all_data:
             source_id, title, url, content, published_date = row
             url_hash = hashlib.sha256(url.encode('utf-8')).hexdigest()
-            cursor.execute(
-                "INSERT IGNORE INTO news "
-                "(source_id, title, url, url_hash, content, published_date) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (source_id, title, url, url_hash, content, published_date)
-            )
-            inserted += cursor.rowcount
 
-        db.commit()
+            # Проверка перед вставкой (просьба ментора)
+            if url_exists(cursor, url_hash):
+                skipped += 1
+                continue
+
+            # Вставка одной новости + коммит сразу
+            if save_news_one(cursor, db, source_id, title, url, url_hash, content, published_date):
+                inserted += 1
+
+        print(f'   ⏭️  Пропущено (уже в базе): {skipped}')
         return inserted
 
     except mysql.connector.Error as e:
         print(f'❌ Ошибка при записи в news_db: {e}')
-        return 0
+        return inserted
     finally:
         if cursor is not None:
             cursor.close()
-        if db is not None and db.is_connected():
+        if db.is_connected():
             db.close()
 
 
@@ -212,14 +198,13 @@ def run_parser():
         print('Нет данных для записи. Пропускаем этот цикл.')
         return
 
-    print(f'💾 Сохраняем {len(all_data)} новостей в news_db...')
+    print(f'💾 Сохраняем {len(all_data)} новостей в news_db (по одной)...')
     inserted = save_news(all_data)
     print(f'✅ Вставлено новых строк: {inserted} (из {len(all_data)} собранных)')
 
 
 if __name__ == '__main__':
-    interval = int(os.getenv('PARSE_INTERVAL', 3600))
-
+    interval = get_parse_interval()
     print(f'🚀 Парсер запущен. Интервал: {interval} секунд ({interval/60:.0f} минут).')
 
     while True:
