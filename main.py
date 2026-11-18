@@ -66,7 +66,7 @@ def load_sources():
     cursor = None
     try:
         cursor = db.cursor()
-        cursor.execute("SELECT id, name, url, domain FROM sources WHERE enabled = TRUE")
+        cursor.execute("SELECT id, name, url, domain, rss_url FROM sources WHERE enabled = TRUE")
         return cursor.fetchall()
     except mysql.connector.Error as e:
         print(f'❌ Ошибка при чтении sources_db: {e}')
@@ -87,6 +87,71 @@ def get_news_xpath(domain):
         return '//a[contains(@href, ".html")]'
     return '//a[@href]'
 
+def parse_rss_date(date_str):
+    """Парсит дату из RSS (RFC 822: 'Wed, 18 Nov 2026 16:04:58 +0500')."""
+    if not date_str:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(date_str)
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return None
+
+
+def parse_rss(source_id, rss_url, cursor, db, max_news=30):
+    """Парсит RSS-ленту, сохраняет новости в БД."""
+    import feedparser
+
+    print(f'--- Начинаем парсинг RSS: {rss_url} (source_id={source_id}) ---')
+    feed = feedparser.parse(rss_url)
+
+    if not feed.entries:
+        print(f'  ⚠️ RSS пустой или недоступен: {rss_url}')
+        return 0, 0
+
+    print(f'Найдено новостей в RSS: {len(feed.entries)}')
+
+    inserted = 0
+    skipped = 0
+
+    for entry in feed.entries[:max_news]:
+        title = (entry.get('title', '') or '').strip()
+        link = (entry.get('link', '') or '').strip()
+        published = entry.get('published', '')
+
+        if not title or not link:
+            continue
+
+        normalized = normalize_url(link.split('#')[0])
+        if not normalized:
+            continue
+
+        url_hash = hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+
+        if url_exists(cursor, url_hash):
+            skipped += 1
+            continue
+
+        print(f'  [{inserted + 1}] Скачиваем: {title[:60]}...')
+        article_html = fetch_html(normalized)
+        if not article_html:
+            continue
+
+        content, published_date = extract_article(article_html)
+
+        # Если из статьи дата не извлеклась — берём из RSS
+        if not published_date and published:
+            published_date = parse_rss_date(published)
+
+        if save_news_one(cursor, db, source_id, title, normalized, url_hash, content, published_date):
+            inserted += 1
+
+        if inserted >= max_news:
+            break
+
+    print(f'--- Завершен RSS: {rss_url}. Вставлено: {inserted}, пропущено: {skipped} ---\n')
+    return inserted, skipped
 
 def process_website(source_id, target_url, source_domain, cursor, db, max_news=15):
     """Парсит сайт и СОХРАНЯЕТ новости в БД в процессе.
@@ -180,8 +245,11 @@ def run_parser():
         cursor = db.cursor()
 
         # === ЦИКЛ ПО САЙТАМ (запись в БД происходит ВНУТРИ process_website) ===
-        for source_id, name, url, domain in sources:
-            ins, skip = process_website(source_id, url, domain, cursor, db)
+        for source_id, name, url, domain, rss_url in sources:
+            if rss_url:
+                ins, skip = parse_rss(source_id, rss_url, cursor, db)
+            else:
+                ins, skip = process_website(source_id, url, domain, cursor, db)
             total_inserted += ins
             total_skipped += skip
 
