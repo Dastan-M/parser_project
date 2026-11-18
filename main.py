@@ -1,17 +1,61 @@
-import os
+import hashlib
 import re
 import time
-import hashlib
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
-from parsel import Selector
+
 import requests
 import mysql.connector
-from courlan import normalize_url
 import trafilatura
+from parsel import Selector
+from courlan import normalize_url
 
 from config import get_parse_interval
 from db import get_connection, url_exists, save_news_one
+
+HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+
+
+def fetch_html(url):
+    """Единая функция скачивания HTML. Возвращает текст или None."""
+    try:
+        response = requests.get(url, timeout=10, headers=HEADERS)
+        if response.status_code != 200:
+            print(f'  ⚠️ {url[:60]} ответил {response.status_code}')
+            return None
+        response.encoding = 'utf-8'
+        return response.text
+    except Exception as e:
+        print(f'  ⚠️ Ошибка скачивания {url[:60]}: {e}')
+        return None
+
+
+def extract_article(html):
+    """Извлекает текст статьи и дату публикации из готового HTML."""
+    try:
+        metadata = trafilatura.extract_metadata(html)
+        published_date = parse_date(metadata.date) if metadata and metadata.date else None
+        content = trafilatura.extract(
+            html,
+            include_comments=False,
+            include_tables=False,
+            favor_recall=True
+        )
+        return content, published_date
+    except Exception as e:
+        print(f'  ⚠️ Ошибка извлечения текста: {e}')
+        return None, None
+
+
+def parse_date(date_str):
+    if not date_str:
+        return None
+    for fmt in ['%Y-%m-%d', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%d.%m.%Y', '%Y/%m/%d']:
+        try:
+            return datetime.strptime(date_str[:19], fmt).strftime('%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            continue
+    return None
 
 
 def load_sources():
@@ -44,135 +88,106 @@ def get_news_xpath(domain):
     return '//a[@href]'
 
 
-def parse_date(date_str):
-    if not date_str:
-        return None
-    for fmt in ['%Y-%m-%d', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%d.%m.%Y', '%Y/%m/%d']:
-        try:
-            return datetime.strptime(date_str[:19], fmt).strftime('%Y-%m-%d %H:%M:%S')
-        except ValueError:
-            continue
-    return None
+def process_website(source_id, target_url, source_domain, cursor, db, max_news=15):
+    """Парсит сайт и СОХРАНЯЕТ новости в БД в процессе.
 
-
-def fetch_article(url):
-    """Скачивает статью, возвращает (текст, дата_публикации)."""
-    try:
-        downloaded = trafilatura.fetch_url(url)
-        if not downloaded:
-            return None, None
-        metadata = trafilatura.extract_metadata(downloaded)
-        published_date = parse_date(metadata.date) if metadata and metadata.date else None
-        content = trafilatura.extract(
-            downloaded,
-            include_comments=False,
-            include_tables=False,
-            favor_recall=True
-        )
-        return content, published_date
-    except Exception as e:
-        print(f'  ⚠️ Ошибка при извлечении {url[:60]}: {e}')
-        return None, None
-
-
-def parse_website(source_id, target_url, source_domain):
-    """Парсит сайт, возвращает список [source_id, title, url, content, published_date]."""
-    collected_links = []
+    Порядок для каждой ссылки:
+    1. Нормализация
+    2. Проверка в БД по url_hash (самое быстрое)
+    3. Если нет — скачивание, извлечение, вставка (самое дорогое)
+    """
     print(f'--- Начинаем парсинг: {target_url} (source_id={source_id}) ---')
 
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        response = requests.get(target_url, timeout=10, headers=headers)
-        response.encoding = 'utf-8'
+    html = fetch_html(target_url)
+    if not html:
+        return 0, 0  # вставлено, пропущено
 
-        if response.status_code != 200:
-            print(f'Сайт {target_url} ответил со статусом: {response.status_code}')
-            return collected_links
+    selector = Selector(text=html)
+    news_elements = selector.xpath(get_news_xpath(source_domain))
+    if not news_elements:
+        news_elements = selector.xpath('//a[@href]')
 
-        selector = Selector(text=response.text)
-        news_elements = selector.xpath(get_news_xpath(source_domain))
-        if not news_elements:
-            news_elements = selector.xpath('//a[@href]')
+    print(f'Найдено <a> элементов: {len(news_elements)}')
 
-        print(f'Найдено <a> элементов: {len(news_elements)}')
+    seen_urls = set()
+    inserted = 0
+    skipped = 0
 
-        seen_urls = set()
+    for link in news_elements:
+        if inserted >= max_news:
+            break
 
-        for link in news_elements:
-            title = (link.xpath('normalize-space(string(.))').get() or '').strip()
-            href = link.attrib.get('href', '')
-            if not href:
-                continue
+        title = (link.xpath('normalize-space(string(.))').get() or '').strip()
+        href = link.attrib.get('href', '')
+        if not href or not title:
+            continue
 
-            full_url = urljoin(target_url, href)
-            if not full_url.startswith(('http://', 'https://')):
-                continue
+        full_url = urljoin(target_url, href)
+        if not full_url.startswith(('http://', 'https://')):
+            continue
 
-            link_domain = urlparse(full_url).netloc
-            if not link_domain.endswith(source_domain):
-                continue
+        link_domain = urlparse(full_url).netloc
+        if not link_domain.endswith(source_domain):
+            continue
 
-            if not re.search(r'(/\d{5,})|(/news/[a-z0-9\-]{10,})|(/\d{6,}-)', full_url):
-                continue
+        if not re.search(r'(/\d{5,})|(/news/[a-z0-9\-]{10,})|(/\d{6,}-)', full_url):
+            continue
 
-            normalized = normalize_url(full_url.split('#')[0])
-            if not normalized or normalized in seen_urls:
-                continue
-            seen_urls.add(normalized)
+        normalized = normalize_url(full_url.split('#')[0])
+        if not normalized or normalized in seen_urls:
+            continue
+        seen_urls.add(normalized)
 
-            if not title:
-                continue
+        # === ПРОВЕРКА В БД ДО СКАЧИВАНИЯ ===
+        url_hash = hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+        if url_exists(cursor, url_hash):
+            skipped += 1
+            print(f'  ⏭️  Уже в базе: {title[:50]}')
+            continue
 
-            print(f'  [{len(collected_links) + 1}] Тянем текст: {title[:50]}...')
-            content, published_date = fetch_article(normalized)
+        # === СКАЧИВАНИЕ (только если в БД нет) ===
+        print(f'  [{inserted + 1}] Скачиваем: {title[:50]}...')
+        article_html = fetch_html(normalized)
+        if not article_html:
+            continue
 
-            collected_links.append([source_id, title, normalized, content, published_date])
+        content, published_date = extract_article(article_html)
 
-            if len(collected_links) >= 15:
-                break
+        # === ВСТАВКА ВНУТРИ ЦИКЛА (с commit внутри save_news_one) ===
+        if save_news_one(cursor, db, source_id, title, normalized, url_hash, content, published_date):
+            inserted += 1
 
-        print(f'--- Завершен парсинг: {target_url}. Собрано: {len(collected_links)} ---\n')
-
-    except Exception as e:
-        print(f'Ошибка при запросе к {target_url}: {e}')
-
-    return collected_links
+    print(f'--- Завершен: {target_url}. Вставлено: {inserted}, пропущено: {skipped} ---\n')
+    return inserted, skipped
 
 
-def save_news(all_data):
-    """Вставляет новости ПО ОДНОЙ, с коммитом после каждой и проверкой на дубли."""
-    if not all_data:
-        return 0
+def run_parser():
+    sources = load_sources()
+    if not sources:
+        print('❌ Нет включённых источников в sources_db. Пропускаем цикл.')
+        return
+
+    print(f'📋 Загружено включённых источников: {len(sources)}')
 
     db = get_connection('news')
     if db is None:
-        return 0
+        return
 
     cursor = None
-    inserted = 0
-    skipped = 0
+    total_inserted = 0
+    total_skipped = 0
     try:
         cursor = db.cursor()
 
-        for row in all_data:
-            source_id, title, url, content, published_date = row
-            url_hash = hashlib.sha256(url.encode('utf-8')).hexdigest()
+        # === ЦИКЛ ПО САЙТАМ (запись в БД происходит ВНУТРИ process_website) ===
+        for source_id, name, url, domain in sources:
+            ins, skip = process_website(source_id, url, domain, cursor, db)
+            total_inserted += ins
+            total_skipped += skip
 
-            # Проверка перед вставкой (просьба ментора)
-            if url_exists(cursor, url_hash):
-                skipped += 1
-                continue
-
-            # Вставка одной новости + коммит сразу
-            if save_news_one(cursor, db, source_id, title, url, url_hash, content, published_date):
-                inserted += 1
-
-        print(f'   ⏭️  Пропущено (уже в базе): {skipped}')
-        return inserted
-
+        print(f'✅ Итого: вставлено {total_inserted}, пропущено {total_skipped}')
     except mysql.connector.Error as e:
-        print(f'❌ Ошибка при записи в news_db: {e}')
-        return inserted
+        print(f'❌ Ошибка при работе с news_db: {e}')
     finally:
         if cursor is not None:
             cursor.close()
@@ -180,38 +195,15 @@ def save_news(all_data):
             db.close()
 
 
-def run_parser():
-    sources = load_sources()
-
-    if not sources:
-        print('❌ Нет включённых источников в sources_db. Пропускаем цикл.')
-        return
-
-    print(f'📋 Загружено включённых источников: {len(sources)}')
-
-    all_data = []
-    for source_id, name, url, domain in sources:
-        site_data = parse_website(source_id, url, domain)
-        all_data.extend(site_data)
-
-    if not all_data:
-        print('Нет данных для записи. Пропускаем этот цикл.')
-        return
-
-    print(f'💾 Сохраняем {len(all_data)} новостей в news_db (по одной)...')
-    inserted = save_news(all_data)
-    print(f'✅ Вставлено новых строк: {inserted} (из {len(all_data)} собранных)')
-
-
 if __name__ == '__main__':
     interval = get_parse_interval()
-    print(f'🚀 Парсер запущен. Интервал: {interval} секунд ({interval/60:.0f} минут).')
+    print(f'🚀 Парсер запущен. Интервал: {interval} секунд ({interval / 60:.0f} минут).')
 
     while True:
         try:
             print(f'\n=== Цикл парсинга начат: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} ===')
             run_parser()
-            print(f'=== Цикл завершён. Следующий через {interval/60:.0f} минут ===\n')
+            print(f'=== Цикл завершён. Следующий через {interval / 60:.0f} минут ===\n')
         except Exception as e:
             print(f'❌ Критическая ошибка в цикле: {e}')
 
