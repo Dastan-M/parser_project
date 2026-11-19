@@ -64,6 +64,20 @@ services:
       db_news:
         condition: service_healthy
 
+  api:
+    build: .
+    container_name: my-parser-api
+    entrypoint: uvicorn api:app --host 0.0.0.0 --port 8077
+    ports:
+      - "8077:8077"
+    environment:
+      DB_SOURCES_HOST: db_sources
+      DB_SOURCES_PORT: 3306
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    depends_on:
+      db_sources:
+        condition: service_healthy
+
 volumes:
   db_sources_data:
   db_news_data:
