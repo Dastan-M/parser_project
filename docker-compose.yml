@@ -73,9 +73,13 @@ services:
     environment:
       DB_SOURCES_HOST: db_sources
       DB_SOURCES_PORT: 3306
+      DB_NEWS_HOST: db_news
+      DB_NEWS_PORT: 3306
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
     depends_on:
       db_sources:
+        condition: service_healthy
+      db_news:
         condition: service_healthy
 
 volumes:
