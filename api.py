@@ -1,7 +1,10 @@
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from typing import Optional
 from db import get_connection
 import mysql.connector
+from playwright.async_api import async_playwright
+from playwright_stealth import Stealth
 
 app = FastAPI(title="Parser API", description="Сервис для работы с базой данных парсера")
 
@@ -109,3 +112,39 @@ def get_news_by_id(news_id: int):
     finally:
         if cursor is not None: cursor.close()
         if db.is_connected(): db.close()
+
+
+@app.get("/render", response_class=HTMLResponse)
+async def render_page(url: str):
+    """Открывает ссылку в браузере (со скрытием от Cloudflare) и возвращает HTML."""
+    async with async_playwright() as p:
+        # Запускаем браузер
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
+
+        # Создаем контекст с реалистичным разрешением и User-Agent
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080}
+        )
+        page = await context.new_page()
+
+        try:
+            # Применяем маскировку
+            await Stealth().apply_stealth_async(page)
+
+            # Переходим и ждем
+            await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+
+            # Ждем 10 секунд, чтобы Cloudflare успел пропустить
+            await page.wait_for_timeout(10000)
+
+            html_content = await page.content()
+            return html_content
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Ошибка рендеринга: {str(e)}")
+        finally:
+            await browser.close()
