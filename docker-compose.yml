@@ -58,11 +58,14 @@ services:
       DB_NEWS_HOST: db_news
       DB_NEWS_PORT: 3306
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      API_URL: http://api:8077
     depends_on:
       db_sources:
         condition: service_healthy
       db_news:
         condition: service_healthy
+      api:
+        condition: service_started
 
   api:
     build: .
