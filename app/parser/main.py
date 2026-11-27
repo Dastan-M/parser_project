@@ -11,8 +11,8 @@ import feedparser
 from parsel import Selector
 from courlan import normalize_url
 
-from config import get_parse_interval, get_db_password
-from db import get_connection, url_exists, save_news_one
+from app.core.config import get_parse_interval
+from app.core.db import get_connection, url_exists, save_news_one
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 API_URL = os.getenv('API_URL', 'http://localhost:8077')
@@ -122,7 +122,7 @@ def parse_rss(source_id, rss_url, cursor, db, use_browser, max_news=30):
     return inserted, skipped
 
 
-def process_website(source_id, target_url, source_domain, cursor, db, use_browser, max_news=15):
+def process_website(source_id, target_url, source_domain, cursor, db, use_browser, max_news=10):
     print(f'--- Начинаем парсинг HTML: {target_url} ---')
     html = fetch_html(target_url, use_browser)  # Используем use_browser
     if not html: return 0, 0

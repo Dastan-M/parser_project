@@ -70,7 +70,7 @@ services:
   api:
     build: .
     container_name: my-parser-api
-    entrypoint: uvicorn api:app --host 0.0.0.0 --port 8077
+    entrypoint: uvicorn app.api.main:app --host 0.0.0.0 --port 8077
     ports:
       - "8077:8077"
     environment:

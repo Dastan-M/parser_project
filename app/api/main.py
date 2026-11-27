@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
-from db import get_connection
+from app.core.db import get_connection
 import mysql.connector
 import hashlib
 from playwright.async_api import async_playwright

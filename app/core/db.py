@@ -1,5 +1,5 @@
 import mysql.connector
-from config import get_db_config, get_db_password
+from app.core.config import get_db_config, get_db_password
 
 
 def get_connection(db_type):
