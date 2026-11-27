@@ -1,7 +1,7 @@
 services:
   db_sources:
     image: mysql:8.0
-    container_name: my-mysql-sources
+    #container_name: my-mysql-sources
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: sources_db
@@ -15,11 +15,11 @@ services:
       interval: 15s
       timeout: 10s
       retries: 30
-      start_period: 300s
+      start_period: 600s
 
   db_news:
     image: mysql:8.0
-    container_name: my-mysql-news
+    #container_name: my-mysql-news
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: news_db
@@ -30,14 +30,14 @@ services:
       - ./news_init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: [ "CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD || exit 1" ]
-      interval: 10s
+      interval: 15s
       timeout: 10s
-      retries: 20
-      start_period: 180s
+      retries: 30
+      start_period: 600s
 
   phpmyadmin:
     image: phpmyadmin
-    container_name: my-phpmyadmin-compose
+    #container_name: my-phpmyadmin-compose
     environment:
       PMA_HOSTS: db_sources,db_news
       PMA_PORTS: 3306,3306
@@ -51,7 +51,7 @@ services:
 
   parser:
     build: .
-    container_name: my-parser-compose
+    #container_name: my-parser-compose
     environment:
       DB_SOURCES_HOST: db_sources
       DB_SOURCES_PORT: 3306
@@ -69,7 +69,7 @@ services:
 
   api:
     build: .
-    container_name: my-parser-api
+    #container_name: my-parser-api
     entrypoint: uvicorn app.api.main:app --host 0.0.0.0 --port 8077
     ports:
       - "8077:8077"
