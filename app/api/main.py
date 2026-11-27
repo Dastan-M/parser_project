@@ -1,13 +1,15 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.responses import HTMLResponse
-from app.core.db import get_connection
-import mysql.connector
+from sqlalchemy.orm import Session
 import hashlib
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 from pydantic import HttpUrl
 from contextlib import asynccontextmanager
-import re
+
+# Импортируем наши модели и зависимости для БД
+from app.core.models import Source, News
+from app.core.database import get_sources_db, get_news_db
 
 # --- БРАУЗЕР ---
 playwright_instance = None
@@ -32,82 +34,77 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Parser API", lifespan=lifespan)
 
 
-# --- ЭНДПОИНТ 1: УМНЫЙ ПОИСК ПО ДОМЕНУ/ID ---
+# --- ЭНДПОИНТ 1: УМНЫЙ ПОИСК ПО ДОМЕНУ/ID (ЧЕРЕЗ ORM) ---
 @app.get("/domain")
-def search_by_domain(query: str = Query(..., description="ID (1), домен (nur.kz) или ссылка (https://nur.kz)")):
-    # 1. Очищаем запрос: убираем http://, https:// и слеши на конце
+def search_by_domain(
+        query: str = Query(..., description="ID (1), домен (nur.kz) или ссылка (https://nur.kz)"),
+        sources_db: Session = Depends(get_sources_db),
+        news_db: Session = Depends(get_news_db)
+):
     clean_query = query.replace('https://', '').replace('http://', '').strip('/')
 
-    db_sources = get_connection('sources')
-    if db_sources is None: raise HTTPException(status_code=500, detail="DB sources failed")
+    # Ищем источник через ORM
+    if clean_query.isdigit():
+        source_info = sources_db.query(Source).filter(Source.id == int(clean_query)).first()
+    else:
+        source_info = sources_db.query(Source).filter(Source.domain == clean_query).first()
 
-    source_info = None
-    cursor_s = None
-    try:
-        cursor_s = db_sources.cursor(dictionary=True)
+    if not source_info:
+        raise HTTPException(status_code=404, detail=f"Источник '{query}' не найден")
 
-        # 2. Определяем: это ID (число) или домен?
-        if clean_query.isdigit():
-            cursor_s.execute("SELECT * FROM sources WHERE id = %s", (int(clean_query),))
-        else:
-            # Ищем по домену (например, nur.kz)
-            cursor_s.execute("SELECT * FROM sources WHERE domain = %s", (clean_query,))
+    # Ищем новости через ORM (сортируем по дате)
+    news_list = news_db.query(News).filter(News.source_id == source_info.id).order_by(News.published_date.desc()).all()
 
-        source_info = cursor_s.fetchone()
+    # Превращаем объекты SQLAlchemy в обычные словари для JSON-ответа
+    source_dict = {
+        "id": source_info.id,
+        "name": source_info.name,
+        "domain": source_info.domain,
+        "enabled": source_info.enabled,
+        "rss_url": source_info.rss_url,
+        "use_browser": source_info.use_browser
+    }
 
-        if not source_info:
-            raise HTTPException(status_code=404, detail=f"Источник '{query}' не найден")
+    news_dicts = [
+        {
+            "id": n.id,
+            "title": n.title,
+            "url": n.url,
+            "published_date": n.published_date,
+            "parsed_date": n.parsed_date
+        } for n in news_list
+    ]
 
-    finally:
-        if cursor_s is not None: cursor_s.close()
-        if db_sources.is_connected(): db_sources.close()
-
-    # 3. Если сайт найден, ищем его новости
-    db_news = get_connection('news')
-    if db_news is None: raise HTTPException(status_code=500, detail="DB news failed")
-
-    cursor_n = None
-    try:
-        cursor_n = db_news.cursor(dictionary=True)
-        # Ищем новости по ID источника
-        cursor_n.execute(
-            "SELECT id, title, url, published_date, parsed_date FROM news WHERE source_id = %s ORDER BY published_date DESC",
-            (source_info['id'],)
-        )
-        news_list = cursor_n.fetchall()
-
-        return {
-            "source": source_info,
-            "news_count": len(news_list),
-            "news": news_list
-        }
-    finally:
-        if cursor_n is not None: cursor_n.close()
-        if db_news.is_connected(): db_news.close()
+    return {
+        "source": source_dict,
+        "news_count": len(news_dicts),
+        "news": news_dicts
+    }
 
 
-# --- ЭНДПОИНТ 2: ПОИСК КОНКРЕТНОЙ НОВОСТИ ПО ССЫЛКЕ ---
+# --- ЭНДПОИНТ 2: ПОИСК КОНКРЕТНОЙ НОВОСТИ ПО ССЫЛКЕ (ЧЕРЕЗ ORM) ---
 @app.get("/news")
-def search_by_link(url: str = Query(..., description="Точная ссылка на новость")):
-    # Генерируем хэш ссылки (как в парсере), чтобы найти новость
+def search_by_link(
+        url: str = Query(..., description="Точная ссылка на новость"),
+        news_db: Session = Depends(get_news_db)
+):
     url_hash = hashlib.sha256(url.encode('utf-8')).hexdigest()
 
-    db = get_connection('news')
-    if db is None: raise HTTPException(status_code=500, detail="DB failed")
+    # Ищем новость по хэшу через ORM
+    result = news_db.query(News).filter(News.url_hash == url_hash).first()
 
-    cursor = None
-    try:
-        cursor = db.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM news WHERE url_hash = %s", (url_hash,))
-        result = cursor.fetchone()
+    if not result:
+        raise HTTPException(status_code=404, detail="Новость с такой ссылкой не найдена")
 
-        if not result:
-            raise HTTPException(status_code=404, detail=f"Новость с такой ссылкой не найдена")
-
-        return result
-    finally:
-        if cursor is not None: cursor.close()
-        if db.is_connected(): db.close()
+    return {
+        "id": result.id,
+        "source_id": result.source_id,
+        "title": result.title,
+        "url": result.url,
+        "content": result.content,
+        "published_date": result.published_date,
+        "parsed_date": result.parsed_date
+    }
 
 
 # --- ЭНДПОИНТ 3: БРАУЗЕР (RENDER) ---
